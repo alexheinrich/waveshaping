@@ -1,13 +1,16 @@
-#include<stdio.h>
-#include<math.h>
-#include<time.h>
-#include<SDL2/SDL.h>
-#include<rtmidi/rtmidi_c.h>
-#include"knmtab.h"
+#include <stdio.h>
+#include <math.h>
+#include <time.h>
+#include <SDL2/SDL.h>
+#include <rtmidi/rtmidi_c.h>
+#include "knmtab.h"
 
 #define SAMPLING_RATE 44100
 #define PI 3.14159265
 #define TWOPI PI * 2
+
+#define BUF_SZ 16
+#define NUM_OSC 4
 
 typedef struct {
 	double twopiovrsr;
@@ -16,15 +19,26 @@ typedef struct {
 	double incr;
 } oscil_t;
 
+float staged_frequencies[NUM_OSC];
+int32_t current_oscillator = 0;
+
+oscil_t *oscillators[NUM_OSC];
+
+float frequency1 = 440.0;
+float frequency2 = 440.0;
+float frequency3 = 440.0;
+float frequency4 = 440.0;
+
 SDL_AudioDeviceID AudioDevice;
 SDL_AudioSpec have;
 
-float frequency = 440.0;
-struct RtMidiWrapper* midiin;
+struct RtMidiWrapper *midiin;
 double volume;
 bool res_vol;
-int32_t t_delt;
-oscil_t *oscil1;
+
+int32_t t_delt[NUM_OSC];
+bool note_playing[NUM_OSC];
+
 
 void oscil_init(oscil_t *osc, unsigned long s_rate)
 {
@@ -45,24 +59,27 @@ oscil_t *oscil(void)
 
 double sine_tick(oscil_t* p_osc, double freq)
 {
-	double val;
+	double tick;
 
-	val = sin(p_osc->curphase);
-	int32_t i_val = val * 115 + 115;
+	tick = sin(p_osc->curphase);
+
+	int32_t int_tick = ((int32_t) tick) * 115 + 115;
 
 	for (uint32_t i = 1; i < 32; i++) {
-		double vol;
+		double volume;
+
 		if (i % 3) {
-			vol = 1;
+			volume = 1;
 		} else {
-			vol = 0.25;
+			volume = 0.25;
 		}
-		val += vol * ((double) knmtab[i][i_val] / 1023.0);
+
+		tick += volume * ((double) knmtab[i][int_tick] / 1023.0);
 	}
 
-	val = val/100;
+	tick = tick/100.0;
 
-	if (val > 1.0 || val < -1.0) {
+	if (tick > 1.0 || tick < -1.0) {
 		printf("Amplitude has exceed 1\n");
 	}
 
@@ -81,50 +98,51 @@ double sine_tick(oscil_t* p_osc, double freq)
 		p_osc->curphase += TWOPI;
 	}
 
-	return val;
+	return sin(p_osc->curphase);
 }
 
-static void init_volume(void)
+static double calc_volume(double time, int32_t osc_number)
 {
-	res_vol = true;
-}
+	double attack = 5000.0;
+	double sustain = 30000.0;
+	double release = 40000.0;
+	double max_volume = 0.64;
 
-static void calc_volume(void)
-{
-	if (res_vol) {
-		if (volume > 1) {
-			volume = volume - 1;
-		} else {
-			volume = 0;
-			res_vol = false;
-			t_delt = 0;
-		}
-
-		return;
-	}
-	printf("%d t_delt\n", t_delt);
-	if (t_delt < 1000) {
-		volume = ((double) t_delt / 1000.0) * 64.0;
-		//volume = 64;
+	if (time < attack) {
+		return max_volume * (time / attack);
+	} else if (time >= attack && time < attack + sustain) {
+		return max_volume;
+	} else if (time >= attack + sustain && time < attack + sustain + release) {
+		double ret = max_volume * ((release - time + attack + sustain) / release);
+		return ret;
 	} else {
-		volume = volume * 0.99995;
+		note_playing[osc_number] = 0;
+		return 0.0;
 	}
 }
 
 static void audio_callback(void *udata, uint8_t *stream, int32_t len)
 {
 	(void) udata;
-	static int count_sam = 0;
-
     float* floatStream = (float*) stream;
 
     SDL_memset(stream, 0, len);
 
-    for (int j = 0; j < len/4; j++) {
-        t_delt++;
-        calc_volume();
-    		floatStream[j] = volume * sine_tick(oscil1, frequency);
-        count_sam++;
+    for (int32_t j = 0; j < len/4; j++) {
+    		float stream_buffer = 0;
+
+    		for (int32_t i = 0; i < NUM_OSC; i++) {
+			if (note_playing[i]) {
+				t_delt[i]++;
+			} else {
+				t_delt[i] = 0;
+			}
+
+    			double envelope_point = calc_volume((double) t_delt[i], i) * sine_tick(oscillators[i], staged_frequencies[i]);
+    			stream_buffer = envelope_point + stream_buffer - envelope_point * stream_buffer;
+    		}
+
+    		floatStream[j] = (float) stream_buffer;
     }
 }
 
@@ -133,7 +151,8 @@ static float mid_to_hz(const unsigned char message)
 	return (float) 440 * pow(pow(2, 1.0/12.0), (uint8_t) message - 60);
 }
 
-static void midi_callback(double timeStamp, const unsigned char* message, size_t size, void *userData) {
+static void midi_callback(double timeStamp, const unsigned char* message, size_t size, void *userData)
+{
 	(void) userData;
 	(void) timeStamp;
 	(void) size;
@@ -148,10 +167,13 @@ static void midi_callback(double timeStamp, const unsigned char* message, size_t
 		return;
 	}
 
-	frequency = mid_to_hz(message[1]);
-	printf("freq is %lf\n", frequency);
+	double note_frequency = mid_to_hz(message[1]);
+	// TODO: check if note already played
 
-	init_volume();
+	staged_frequencies[current_oscillator] = note_frequency;
+	note_playing[current_oscillator] = 1;
+
+	current_oscillator = (current_oscillator + 1) % NUM_OSC;
 }
 
 void mid_init(void)
@@ -195,7 +217,7 @@ void mid_quit(void)
 	printf("mid quit");
 }
 
-static void init()
+static void init(void)
 {
     if (SDL_Init(SDL_INIT_AUDIO|SDL_INIT_TIMER) < 0) {
         fprintf(stderr, "SDL_Init() printfed %s\n", SDL_GetError());
@@ -205,8 +227,12 @@ static void init()
     SDL_AudioSpec wavSpec;
     SDL_zero(wavSpec);
 
-    oscil1 = oscil();
-    oscil_init(oscil1, SAMPLING_RATE);
+    for(int32_t i = 0; i < NUM_OSC; i++) {
+    		oscillators[i] = oscil();
+    		oscil_init(oscillators[i], SAMPLING_RATE);
+    		t_delt[i] = 0;
+    		note_playing[i] = 0;
+    }
 
     wavSpec.freq = SAMPLING_RATE;
     wavSpec.channels = 1;
@@ -217,7 +243,6 @@ static void init()
 
     volume = 0;
     res_vol = false;
-    t_delt = 999;
 
     AudioDevice = SDL_OpenAudioDevice(NULL, 0, &wavSpec, &have, SDL_AUDIO_ALLOW_FORMAT_CHANGE);
     if (AudioDevice == 0) {
@@ -230,17 +255,19 @@ static void init()
     mid_init();
 }
 
-static void quit()
+static void quit(void)
 {
     SDL_CloseAudioDevice(AudioDevice);
     SDL_Quit();
 
-    free(oscil1);
+    for(int32_t i = 0; i < NUM_OSC; i++) {
+    		free(oscillators[i]);
+    }
 
     mid_quit();
 }
 
-int32_t main()
+int32_t main(void)
 {
     init();
 
