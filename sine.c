@@ -10,7 +10,14 @@
 #define TWOPI PI * 2
 
 #define BUF_SZ 16
-#define NUM_OSC 4
+#define NUM_OSC 16
+
+typedef enum {
+	PRESSED,
+	RELEASED,
+	RESETTING,
+	OFF
+} notestatus_t;
 
 typedef struct {
 	double twopiovrsr;
@@ -19,26 +26,25 @@ typedef struct {
 	double incr;
 } oscil_t;
 
-float staged_frequencies[NUM_OSC];
-int32_t current_oscillator = 0;
+typedef struct {
+	notestatus_t note_status;
+	double current_value;
+	double increment;
+	double attack;
+	double release;
+	double max_volume;
+} env_t;
 
 oscil_t *oscillators[NUM_OSC];
+float staged_frequencies[NUM_OSC]; // TODO: merge into oscil_t
+int32_t current_oscillator = 0;
 
-float frequency1 = 440.0;
-float frequency2 = 440.0;
-float frequency3 = 440.0;
-float frequency4 = 440.0;
+env_t envelopes[NUM_OSC];
 
 SDL_AudioDeviceID AudioDevice;
 SDL_AudioSpec have;
 
 struct RtMidiWrapper *midiin;
-double volume;
-bool res_vol;
-
-int32_t t_delt[NUM_OSC];
-bool note_playing[NUM_OSC];
-
 
 void oscil_init(oscil_t *osc, unsigned long s_rate)
 {
@@ -61,26 +67,25 @@ double sine_tick(oscil_t* p_osc, double freq)
 {
 	double tick;
 
-	tick = sin(p_osc->curphase);
+	tick = (double) sin(p_osc->curphase);
 
-	int32_t int_tick = ((int32_t) tick) * 115 + 115;
+	int32_t int_tick = (int32_t) (tick * 115.0 + 115.0);
+	tick = 0;
+	//printf("int tick %d\n", int_tick);
+	//printf("tick %f\n", tick);
 
-	for (uint32_t i = 1; i < 32; i++) {
-		double volume;
-
-		if (i % 3) {
-			volume = 1;
-		} else {
-			volume = 0.25;
-		}
-
-		tick += volume * ((double) knmtab[i][int_tick] / 1023.0);
+	for (uint32_t i = 1; i < 5; i++) {
+		double knm = ((double) knmtab[i][int_tick] + 1022.0) / 2048.0;
+		tick = tick + knm - tick * knm;
 	}
 
-	tick = tick/100.0;
+
+	//printf("tick %f\n", tick);
+
+	//tick = tick/32.0;
 
 	if (tick > 1.0 || tick < -1.0) {
-		printf("Amplitude has exceed 1\n");
+		printf("Amplitude has exceed 1 %f\n", tick);
 	}
 
 	if (p_osc->curfreq != freq) {
@@ -101,24 +106,37 @@ double sine_tick(oscil_t* p_osc, double freq)
 	return sin(p_osc->curphase);
 }
 
-static double calc_volume(double time, int32_t osc_number)
+static double calc_volume(int32_t osc_number)
 {
-	double attack = 5000.0;
-	double sustain = 30000.0;
-	double release = 40000.0;
-	double max_volume = 0.64;
+	double ret = 0.0;
 
-	if (time < attack) {
-		return max_volume * (time / attack);
-	} else if (time >= attack && time < attack + sustain) {
-		return max_volume;
-	} else if (time >= attack + sustain && time < attack + sustain + release) {
-		double ret = max_volume * ((release - time + attack + sustain) / release);
-		return ret;
-	} else {
-		note_playing[osc_number] = 0;
-		return 0.0;
+	if (envelopes[osc_number].note_status == PRESSED && envelopes[osc_number].current_value >= envelopes[osc_number].max_volume) {
+		envelopes[osc_number].increment = 0.0;
 	}
+
+	envelopes[osc_number].current_value += envelopes[osc_number].increment;
+
+	if (envelopes[osc_number].current_value <= 0.0) {
+		if (envelopes[osc_number].note_status == RESETTING) {
+			envelopes[osc_number].note_status = PRESSED;
+			envelopes[osc_number].increment = envelopes[current_oscillator].max_volume / envelopes[current_oscillator].attack;
+		} else {
+			envelopes[osc_number].note_status = OFF;
+			envelopes[osc_number].increment = 0.0;
+		}
+
+		envelopes[osc_number].current_value = 0.0;
+	}
+
+	ret = envelopes[osc_number].current_value;
+
+	if (ret > 64.0 || ret < 0.0) {
+		printf("ret %f\n", ret);
+		ret = 0.0;
+	}
+	//printf("note status %d\n", envelopes[osc_number].note_status);
+	//printf("ret %f\n", ret);
+	return ret;
 }
 
 static void audio_callback(void *udata, uint8_t *stream, int32_t len)
@@ -132,13 +150,7 @@ static void audio_callback(void *udata, uint8_t *stream, int32_t len)
     		float stream_buffer = 0;
 
     		for (int32_t i = 0; i < NUM_OSC; i++) {
-			if (note_playing[i]) {
-				t_delt[i]++;
-			} else {
-				t_delt[i] = 0;
-			}
-
-    			double envelope_point = calc_volume((double) t_delt[i], i) * sine_tick(oscillators[i], staged_frequencies[i]);
+    			double envelope_point = calc_volume(i) * sine_tick(oscillators[i], staged_frequencies[i]);
     			stream_buffer = envelope_point + stream_buffer - envelope_point * stream_buffer;
     		}
 
@@ -163,15 +175,35 @@ static void midi_callback(double timeStamp, const unsigned char* message, size_t
 
 	printf("\n");
 
+	double note_frequency = mid_to_hz(message[1]);
+
 	if ((uint8_t) message[2] == 0) {
+		for (int32_t i = 0; i < NUM_OSC; i++) {
+			if (staged_frequencies[i] == note_frequency) {
+				envelopes[i].note_status = RELEASED;
+				envelopes[i].increment = envelopes[i].current_value / envelopes[i].release * -1.0;
+			}
+		}
+
 		return;
 	}
 
-	double note_frequency = mid_to_hz(message[1]);
-	// TODO: check if note already played
+	for (int32_t i = 0; i < NUM_OSC; i++) {
+		if (staged_frequencies[i] == note_frequency) {
+			envelopes[i].note_status = RESETTING;
+			envelopes[i].increment = envelopes[i].current_value / 200.0 * -1.0;
+			return;
+		}
+	}
 
 	staged_frequencies[current_oscillator] = note_frequency;
-	note_playing[current_oscillator] = 1;
+	if (envelopes[current_oscillator].note_status != OFF) {
+		envelopes[current_oscillator].note_status = RESETTING;
+		envelopes[current_oscillator].increment = 0.0;
+	} else {
+		envelopes[current_oscillator].note_status = PRESSED;
+		envelopes[current_oscillator].increment = envelopes[current_oscillator].max_volume / envelopes[current_oscillator].attack;
+	}
 
 	current_oscillator = (current_oscillator + 1) % NUM_OSC;
 }
@@ -230,8 +262,13 @@ static void init(void)
     for(int32_t i = 0; i < NUM_OSC; i++) {
     		oscillators[i] = oscil();
     		oscil_init(oscillators[i], SAMPLING_RATE);
-    		t_delt[i] = 0;
-    		note_playing[i] = 0;
+    		staged_frequencies[i] = 440.0;
+    		envelopes[i].note_status = OFF;
+    		envelopes[i].current_value = 0.0;
+    		envelopes[i].increment = 0.0;
+    		envelopes[i].attack = 5000.0;
+    		envelopes[i].release = 40000.0;
+    		envelopes[i].max_volume = 0.64;
     }
 
     wavSpec.freq = SAMPLING_RATE;
@@ -240,9 +277,6 @@ static void init(void)
     wavSpec.callback = audio_callback;
     wavSpec.format = AUDIO_F32;
     wavSpec.userdata = NULL;
-
-    volume = 0;
-    res_vol = false;
 
     AudioDevice = SDL_OpenAudioDevice(NULL, 0, &wavSpec, &have, SDL_AUDIO_ALLOW_FORMAT_CHANGE);
     if (AudioDevice == 0) {
