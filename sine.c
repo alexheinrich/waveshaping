@@ -1,52 +1,8 @@
-#include <stdio.h>
-#include <math.h>
-#include <time.h>
-#include <SDL2/SDL.h>
-#include <rtmidi/rtmidi_c.h>
+#include "all.h"
 #include "knmtab.h"
-
-#define SAMPLING_RATE 44100
-#define PI 3.14159265
-#define TWOPI PI * 2
-
-#define BUF_SZ 16
-#define NUM_OSC 8
-
-typedef enum {
-	PRESSED,
-	RELEASED,
-	RESETTING,
-	OFF
-} notestatus_t;
-
-typedef struct {
-	double twopiovrsr;
-	double curfreq;
-	double stagedfreq;
-	double curphase;
-	double incr;
-} oscil_t;
-
-typedef struct {
-	notestatus_t note_status;
-	double current_value;
-	double increment;
-	double attack;
-	double release;
-	double max_volume;
-} env_t;
-
-int32_t current_oscillator = 0;
-
-oscil_t *oscillators[NUM_OSC];
-oscil_t *modulators[NUM_OSC];
-oscil_t *lfos[NUM_OSC];
-env_t *envelopes[NUM_OSC];
 
 SDL_AudioDeviceID AudioDevice;
 SDL_AudioSpec have;
-
-struct RtMidiWrapper *midiin;
 
 oscil_t *oscil(void)
 {
@@ -165,97 +121,6 @@ static void audio_callback(void *udata, uint8_t *stream, int32_t len)
     }
 }
 
-static float mid_to_hz(const unsigned char message)
-{
-	return (float) 440 * pow(pow(2, 1.0/12.0), (uint8_t) message - 60);
-}
-
-static void midi_callback(double timeStamp, const unsigned char* message, size_t size, void *userData)
-{
-	(void) userData;
-	(void) timeStamp;
-	(void) size;
-
-	for (uint8_t i = 0; i < sizeof(message); i++) {
-		printf("Message %i %u ", i, (uint8_t) message[i]);
-	}
-
-	printf("\n");
-
-	double note_frequency = mid_to_hz(message[1]);
-
-	if ((uint8_t) message[2] == 0) {
-		for (int32_t i = 0; i < NUM_OSC; i++) {
-			if (oscillators[i]->stagedfreq == note_frequency) {
-				envelopes[i]->note_status = RELEASED;
-				envelopes[i]->increment = envelopes[i]->current_value / envelopes[i]->release * -1.0;
-			}
-		}
-
-		return;
-	}
-
-	for (int32_t i = 0; i < NUM_OSC; i++) {
-		if (oscillators[i]->stagedfreq == note_frequency) {
-			envelopes[i]->note_status = RESETTING;
-			envelopes[i]->increment = envelopes[i]->current_value / 200.0 * -1.0;
-			return;
-		}
-	}
-
-	oscillators[current_oscillator]->stagedfreq = note_frequency;
-	if (envelopes[current_oscillator]->note_status != OFF) {
-		envelopes[current_oscillator]->note_status = RESETTING;
-		envelopes[current_oscillator]->increment = 0.0;
-	} else {
-		envelopes[current_oscillator]->note_status = PRESSED;
-		envelopes[current_oscillator]->increment = envelopes[current_oscillator]->max_volume / envelopes[current_oscillator]->attack;
-	}
-
-	current_oscillator = (current_oscillator + 1) % NUM_OSC;
-}
-
-void mid_init(void)
-{
-	printf("mid init");
-
-	midiin = rtmidi_in_create_default();
-	printf("%p", midiin->ptr);
-
-	uint32_t portcount = rtmidi_get_port_count(midiin);
-	printf("%d", midiin->ok);
-
-	if (portcount == 0) {
-		midiin = NULL;
-		printf("no midi ports\n");
-		return;
-	}
-
-	for (uint32_t i = 0; i < portcount; i++) {
-		printf("Port %d: %s", i, rtmidi_get_port_name(midiin, i));
-	}
-
-	rtmidi_open_port(midiin, 0, rtmidi_get_port_name(midiin, 0));
-	if(!midiin->ok) {
-		printf("failed to open MIDI port");
-	}
-
-	rtmidi_in_set_callback(midiin, midi_callback, midiin->data);
-	if(!midiin->ok) {
-		printf("failed to set MIDI Callback");
-	}
-}
-
-void mid_quit(void)
-{
-	if (midiin) {
-		rtmidi_close_port(midiin);
-		rtmidi_in_free(midiin);
-	}
-
-	printf("mid quit");
-}
-
 static void init(void)
 {
     if (SDL_Init(SDL_INIT_AUDIO|SDL_INIT_TIMER) < 0) {
@@ -266,7 +131,7 @@ static void init(void)
     SDL_AudioSpec wavSpec;
     SDL_zero(wavSpec);
 
-    for(int32_t i = 0; i < NUM_OSC; i++) {
+    for (int32_t i = 0; i < NUM_OSC; i++) {
     		oscillators[i] = oscil();
     		oscil_init(oscillators[i], SAMPLING_RATE);
     		oscillators[i]->stagedfreq = 440.0;
@@ -306,7 +171,7 @@ static void quit(void)
     SDL_CloseAudioDevice(AudioDevice);
     SDL_Quit();
 
-    for(int32_t i = 0; i < NUM_OSC; i++) {
+    for (int32_t i = 0; i < NUM_OSC; i++) {
     		free(oscillators[i]);
     		free(modulators[i]);
     		free(lfos[i]);

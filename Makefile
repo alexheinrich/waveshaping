@@ -26,10 +26,10 @@ LIBS := $(SDL2_LIB)/libSDL2.a \
 FLAGS := -O2 -Wall -Wextra -I $(SDL2_INC) -I $(RTMIDI_INC)
 
 %.o: %.c
-	$(GCC) $(FLAGS) -c -o $@ $< $(FLAGS)
+	$(GCC) $(FLAGS) -c -o build/$@ $< $(FLAGS)
 
-sine: sine.o
-	$(G++) -o $@ $< $(LIBS)
+sine: sine.o mid.o
+	$(G++) -o $@ build/*.o $(LIBS)
 
 clean:
-	rm -f *.o sine
+	rm -f build/*.o sine
