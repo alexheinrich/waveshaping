@@ -10,7 +10,7 @@
 #define TWOPI PI * 2
 
 #define BUF_SZ 16
-#define NUM_OSC 1
+#define NUM_OSC 8
 
 typedef enum {
 	PRESSED,
@@ -41,13 +41,22 @@ int32_t current_oscillator = 0;
 oscil_t *oscillators[NUM_OSC];
 oscil_t *modulators[NUM_OSC];
 oscil_t *lfos[NUM_OSC];
-
-env_t envelopes[NUM_OSC];
+env_t *envelopes[NUM_OSC];
 
 SDL_AudioDeviceID AudioDevice;
 SDL_AudioSpec have;
 
 struct RtMidiWrapper *midiin;
+
+oscil_t *oscil(void)
+{
+	oscil_t *osc = (oscil_t*) malloc(sizeof(oscil_t));
+	if (osc == NULL) {
+		return NULL;
+	}
+
+	return osc;
+}
 
 void oscil_init(oscil_t *osc, unsigned long s_rate)
 {
@@ -57,13 +66,24 @@ void oscil_init(oscil_t *osc, unsigned long s_rate)
 	osc->incr = 0.0;
 }
 
-oscil_t *oscil(void)
+env_t *env(void)
 {
-	oscil_t *osc = (oscil_t*) malloc(sizeof(oscil_t));
-	if (osc == NULL) {
+	env_t *env = (env_t*) malloc(sizeof(env_t));
+	if (env == NULL) {
 		return NULL;
 	}
-	return osc;
+
+	return env;
+}
+
+void env_init(env_t *env)
+{
+	env->note_status = OFF;
+	env->current_value = 0.0;
+	env->increment = 0.0;
+	env->attack = 5000.0;
+	env->release = 40000.0;
+	env->max_volume = 0.64;
 }
 
 void oscil_phase_incr(oscil_t* p_osc)
@@ -86,28 +106,6 @@ void oscil_phase_incr(oscil_t* p_osc)
 
 double calc_tick(oscil_t* p_osc, oscil_t* p_mod, oscil_t* p_lfo)
 {
-//	double tick;
-
-//	tick = (double) sin(p_osc->curphase);
-//
-//	int32_t int_tick = (int32_t) (tick * 115.0 + 115.0);
-//	tick = 0;
-//	//printf("int tick %d\n", int_tick);
-//	//printf("tick %f\n", tick);
-//
-//	for (uint32_t i = 1; i < 5; i++) {
-//		double knm = ((double) knmtab[i][int_tick] + 1022.0) / 2048.0;
-//		tick = tick + knm - tick * knm;
-//	}
-
-
-	//printf("tick %f\n", tick);
-
-	//tick = tick/32.0;
-//
-//	if (tick > 1.0 || tick < -1.0) {
-//		printf("Amplitude has exceed 1 %f\n", tick);
-//	}
 	oscil_phase_incr(p_osc);
 	oscil_phase_incr(p_mod);
 	oscil_phase_incr(p_lfo);
@@ -115,37 +113,36 @@ double calc_tick(oscil_t* p_osc, oscil_t* p_mod, oscil_t* p_lfo)
 	return cos(p_osc->curphase + (4 + 2 * sin(p_lfo->curphase)) * sin(p_mod->curphase));
 }
 
-static double calc_volume(int32_t osc_number)
+static double calc_volume(env_t* p_env)
 {
 	double ret = 0.0;
 
-	if (envelopes[osc_number].note_status == PRESSED && envelopes[osc_number].current_value >= envelopes[osc_number].max_volume) {
-		envelopes[osc_number].increment = 0.0;
+	if (p_env->note_status == PRESSED && p_env->current_value >= p_env->max_volume) {
+		p_env->increment = 0.0;
 	}
 
-	envelopes[osc_number].current_value += envelopes[osc_number].increment;
+	p_env->current_value += p_env->increment;
 
-	if (envelopes[osc_number].current_value <= 0.0) {
-		if (envelopes[osc_number].note_status == RESETTING) {
-			envelopes[osc_number].note_status = PRESSED;
-			envelopes[osc_number].increment = envelopes[current_oscillator].max_volume / envelopes[current_oscillator].attack;
+	if (p_env->current_value <= 0.0) {
+		if (p_env->note_status == RESETTING) {
+			p_env->note_status = PRESSED;
+			p_env->increment = p_env->max_volume / p_env->attack;
 		}
 		else {
-			envelopes[osc_number].note_status = OFF;
-			envelopes[osc_number].increment = 0.0;
+			p_env->note_status = OFF;
+			p_env->increment = 0.0;
 		}
 
-		envelopes[osc_number].current_value = 0.0;
+		p_env->current_value = 0.0;
 	}
 
-	ret = envelopes[osc_number].current_value;
+	ret = p_env->current_value;
 
 	if (ret > 64.0 || ret < 0.0) {
 		printf("ret %f\n", ret);
 		ret = 0.0;
 	}
-	//printf("note status %d\n", envelopes[osc_number].note_status);
-	//printf("ret %f\n", ret);
+
 	return ret;
 }
 
@@ -160,8 +157,8 @@ static void audio_callback(void *udata, uint8_t *stream, int32_t len)
     		float stream_buffer = 0;
 
     		for (int32_t i = 0; i < NUM_OSC; i++) {
-    			double envelope_point = calc_volume(i) * calc_tick(oscillators[i], modulators[i], lfos[i]);
-    			stream_buffer = envelope_point + stream_buffer - envelope_point * stream_buffer;
+    			double envelope_point = calc_volume(envelopes[i]) * calc_tick(oscillators[i], modulators[i], lfos[i]);
+    			stream_buffer += envelope_point / NUM_OSC;
     		}
 
     		floatStream[j] = (float) stream_buffer;
@@ -190,8 +187,8 @@ static void midi_callback(double timeStamp, const unsigned char* message, size_t
 	if ((uint8_t) message[2] == 0) {
 		for (int32_t i = 0; i < NUM_OSC; i++) {
 			if (oscillators[i]->stagedfreq == note_frequency) {
-				envelopes[i].note_status = RELEASED;
-				envelopes[i].increment = envelopes[i].current_value / envelopes[i].release * -1.0;
+				envelopes[i]->note_status = RELEASED;
+				envelopes[i]->increment = envelopes[i]->current_value / envelopes[i]->release * -1.0;
 			}
 		}
 
@@ -200,19 +197,19 @@ static void midi_callback(double timeStamp, const unsigned char* message, size_t
 
 	for (int32_t i = 0; i < NUM_OSC; i++) {
 		if (oscillators[i]->stagedfreq == note_frequency) {
-			envelopes[i].note_status = RESETTING;
-			envelopes[i].increment = envelopes[i].current_value / 200.0 * -1.0;
+			envelopes[i]->note_status = RESETTING;
+			envelopes[i]->increment = envelopes[i]->current_value / 200.0 * -1.0;
 			return;
 		}
 	}
 
 	oscillators[current_oscillator]->stagedfreq = note_frequency;
-	if (envelopes[current_oscillator].note_status != OFF) {
-		envelopes[current_oscillator].note_status = RESETTING;
-		envelopes[current_oscillator].increment = 0.0;
+	if (envelopes[current_oscillator]->note_status != OFF) {
+		envelopes[current_oscillator]->note_status = RESETTING;
+		envelopes[current_oscillator]->increment = 0.0;
 	} else {
-		envelopes[current_oscillator].note_status = PRESSED;
-		envelopes[current_oscillator].increment = envelopes[current_oscillator].max_volume / envelopes[current_oscillator].attack;
+		envelopes[current_oscillator]->note_status = PRESSED;
+		envelopes[current_oscillator]->increment = envelopes[current_oscillator]->max_volume / envelopes[current_oscillator]->attack;
 	}
 
 	current_oscillator = (current_oscillator + 1) % NUM_OSC;
@@ -251,7 +248,7 @@ void mid_init(void)
 
 void mid_quit(void)
 {
-	if(midiin) {
+	if (midiin) {
 		rtmidi_close_port(midiin);
 		rtmidi_in_free(midiin);
 	}
@@ -276,18 +273,14 @@ static void init(void)
 
     		modulators[i] = oscil();
     		oscil_init(modulators[i], SAMPLING_RATE);
-    		modulators[i]->stagedfreq = 200.0;
+    		modulators[i]->stagedfreq = 330.0;
 
     		lfos[i] = oscil();
     		oscil_init(lfos[i], SAMPLING_RATE);
     		lfos[i]->stagedfreq = 0.1;
 
-    		envelopes[i].note_status = OFF;
-    		envelopes[i].current_value = 0.6;
-    		envelopes[i].increment = 0.0;
-    		envelopes[i].attack = 5000.0;
-    		envelopes[i].release = 40000.0;
-    		envelopes[i].max_volume = 0.64;
+    		envelopes[i] = env();
+    		env_init(envelopes[i]);
     }
 
     wavSpec.freq = SAMPLING_RATE;
