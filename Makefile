@@ -28,8 +28,8 @@ FLAGS := -O2 -Wall -Wextra -I $(SDL2_INC) -I $(RTMIDI_INC)
 %.o: %.c
 	$(GCC) $(FLAGS) -c -o build/$@ $< $(FLAGS)
 
-sine: sine.o mid.o
+instr: main.o mid.o fm.o
 	$(G++) -o $@ build/*.o $(LIBS)
 
 clean:
-	rm -f build/*.o sine
+	rm -f build/*.o instr

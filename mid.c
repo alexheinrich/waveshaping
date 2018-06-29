@@ -24,7 +24,7 @@ static void midi_callback(double timeStamp, const uint8_t *message, void *userDa
 
 	if ((uint8_t) message[2] == 0) {
 		for (int32_t i = 0; i < NUM_OSC; i++) {
-			if (oscillators[i]->stagedfreq == note_frequency) {
+			if (voices[i]->osc[0].stagedfreq == note_frequency) {
 				envelopes[i]->note_status = RELEASED;
 				envelopes[i]->increment = envelopes[i]->current_value / envelopes[i]->release * -1.0;
 			}
@@ -34,7 +34,7 @@ static void midi_callback(double timeStamp, const uint8_t *message, void *userDa
 	}
 
 	for (int32_t i = 0; i < NUM_OSC; i++) {
-		if (oscillators[i]->stagedfreq == note_frequency) {
+		if (voices[i]->osc[0].stagedfreq == note_frequency) {
 			envelopes[i]->note_status = RESETTING;
 			envelopes[i]->increment = envelopes[i]->current_value / 200.0 * -1.0;
 			return;
@@ -42,6 +42,8 @@ static void midi_callback(double timeStamp, const uint8_t *message, void *userDa
 	}
 
 	oscillators[current_oscillator]->stagedfreq = note_frequency;
+	voice_set_frq(voices[current_oscillator], note_frequency);
+
 	if (envelopes[current_oscillator]->note_status != OFF) {
 		envelopes[current_oscillator]->note_status = RESETTING;
 		envelopes[current_oscillator]->increment = 0.0;
